@@ -13,6 +13,9 @@ dependencies = ["torch>=2.2", "psutil>=5.9", "Pillow>=10","torchvision>=0.17","n
 [project.scripts]
 topofault = "topofault.cli:main"
 
+[project.optional-dependencies]
+baselines = ["xgboost>=2.0"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

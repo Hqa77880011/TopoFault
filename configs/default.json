@@ -1,5 +1,7 @@
 {
   "seed": 17,
+  "threads": 1,
+  "dc_sensitivity_columns": [3, 4, 5],
   "device": "cpu",
   "epochs": 150,
   "patience": 15,

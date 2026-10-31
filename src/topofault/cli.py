@@ -43,9 +43,25 @@ def prepare(source, output, seed):
     with np.load(source, allow_pickle=False) as file:
         values = {k: np.asarray(file[k]) for k in file.files}
     n = len(values["x"])
-    groups = values.get("group", np.arange(n))
+    required = {"x", "x_pair", "node", "adjacency", "y", "severity", "group"}
+    if not required.issubset(values):
+        raise ValueError("Missing required arrays: " + ", ".join(sorted(required - values.keys())))
+    if any(value.ndim == 0 or len(value) != n for value in values.values()):
+        raise ValueError("Every source array must share the sample axis")
+    groups = values["group"]
+    if values["x"].ndim != 3 or values["x"].shape[1] != 4 or values["x_pair"].shape != values["x"].shape:
+        raise ValueError("x and x_pair require equal [N,4,T] shapes")
+    nodes = values["node"]
+    if nodes.ndim != 3 or values["adjacency"].shape != (n, nodes.shape[1], nodes.shape[1]):
+        raise ValueError("node and adjacency require [N,V,F] and [N,V,V]")
+    if not np.allclose(values["adjacency"], values["adjacency"].swapaxes(1, 2)):
+        raise ValueError("The component adjacency must be undirected")
+    if not np.issubdtype(values["y"].dtype, np.integer) or np.any((values["y"] < 0) | (values["y"] >= nodes.shape[1])):
+        raise ValueError("y must index a candidate component")
     if "split" in values:
         split = values["split"]
+        if not np.isin(split, [0, 1, 2]).all():
+            raise ValueError("split must contain only 0=train, 1=validation, 2=test")
         for group in np.unique(groups):
             if len(np.unique(split[groups == group])) != 1:
                 raise ValueError("One source group occurs in multiple splits")
@@ -72,6 +88,8 @@ def prepare(source, output, seed):
 
 def train(config, data, output, method):
     cfg = dict(config)
+    cfg["method"] = method
+    torch.set_num_threads(cfg.get("threads", 1))
     random.seed(cfg["seed"])
     np.random.seed(cfg["seed"])
     torch.manual_seed(cfg["seed"])
@@ -127,6 +145,8 @@ def train(config, data, output, method):
                 adversary.step()
             optimizer.zero_grad()
             loss = core.loss(model, batch, cfg)
+            if not torch.isfinite(loss):
+                raise FloatingPointError("Nonfinite training loss")
             loss.backward()
             optimizer.step()
             total += float(loss.detach()) * len(batch["x"])
@@ -169,6 +189,8 @@ def train(config, data, output, method):
 def evaluate(checkpoint, data, output):
     payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
     cfg = payload["config"]
+    cfg["method"] = payload["method"]
+    torch.set_num_threads(cfg.get("threads", 1))
     cfg["_checkpoint_directory"] = str(Path(checkpoint).parent)
     device = torch.device(cfg["device"])
     model = core.Model(cfg, payload["method"]).to(device)

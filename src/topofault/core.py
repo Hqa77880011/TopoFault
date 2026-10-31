@@ -3,7 +3,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from .vision import classification_metrics
+from .vision import classification_metrics, expected_calibration_error
 
 
 METHODS = [
@@ -14,6 +14,7 @@ METHODS = [
     "no_consistency",
     "no_severity",
     "no_calibration",
+    "no_dc_sensitivity",
 ]
 
 
@@ -21,6 +22,7 @@ class Model(nn.Module):
     def __init__(self, cfg, method):
         super().__init__()
         self.method = method
+        self.dc_sensitivity_columns = cfg.get("dc_sensitivity_columns", [3, 4, 5])
         h = cfg["hidden"]
         self.node = nn.Linear(cfg["node_features"], h)
         self.eps = nn.Parameter(torch.zeros(2))
@@ -47,9 +49,16 @@ class Model(nn.Module):
         self.confidence = nn.Sequential(nn.Linear(5 * h, 1), nn.Sigmoid())
 
     def forward(self, waveform, node, adjacency):
-        h = self.node(node.float())
+        node = node.float()
+        if self.method == "no_dc_sensitivity":
+            node = node.clone()
+            node[..., self.dc_sensitivity_columns] = 0
+        h = self.node(node)
         for i, layer in enumerate(self.layers):
             h = layer((1 + self.eps[i]) * h + adjacency.float() @ h)
+        if self.method == "waveform_only":
+            # All three heads must be independent of graph inputs in this control.
+            h = torch.zeros_like(h)
         wave = torch.cat([branch(waveform.float()).squeeze(-1) for branch in self.wave], -1)
         if self.method == "graph_only":
             wave = torch.zeros_like(wave)
@@ -108,6 +117,12 @@ def metrics(prediction, data, cfg):
         np.mean(np.abs(prediction["severity"][np.arange(len(chosen)), chosen] - data["severity"]))
     )
     confidence = prediction["confidence"][np.arange(len(chosen)), chosen]
+    report["softmax_ece"] = report["ece"]
+    if cfg.get("method") == "no_calibration":
+        probability = torch.softmax(torch.as_tensor(prediction["logits"]), -1).numpy()
+        confidence = probability.max(-1)
+    correct = chosen == data["y"]
+    report["ece"] = expected_calibration_error(confidence, correct)
     report["confidence_brier"] = float(np.mean((confidence - (chosen == data["y"])) ** 2))
     return report
 

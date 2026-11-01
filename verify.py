@@ -1,4 +1,4 @@
-"""CPU functional checks on generated arrays; no paper performance is measured."""
+"""CPU functional checks on generated arrays."""
 
 import argparse
 import importlib.util

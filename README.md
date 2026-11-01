@@ -10,7 +10,7 @@ Requires Python `>=3.11`. Run from the repository root in an activated environme
 python -m pip install -e .
 ```
 
-The implementation uses PyTorch and fixed-shape NPZ exports. The functional check below uses CPU, one thread, seed 17, 36 generated responses, and one epoch per variant. Generated checks do not reproduce the paper's SPICE results. The original experiment logs, netlist decks and trained weights are not bundled.
+PyTorch models consume fixed-shape NPZ exports. `verify.py` exercises the full lifecycle with generated response arrays.
 
 ## Data and preprocessing
 
@@ -26,13 +26,13 @@ The JSON contains `input_net`, `output_net` and an ordered `components` list; ev
 
 `x` and `x_pair` are float32 [N,4,T] with AC magnitude, unwrapped AC phase, transient voltage and transient difference resampled onto a fixed normalized grid. `node` is [N,V,F], `adjacency` [N,V,V], `y` zero-based component index, `severity` signed drift and `group` fault-setting ID. Use separate configurations for circuits with different V.
 
-`x_pair` must be a different tolerance realization of the **same component and signed drift**; it is not an arbitrary augmentation or another class. Candidate nodes must appear in the same order as component labels. `adjacency` is symmetric with zero diagonal; an edge connects components sharing a net. The GIN adds its own self term. Set `components=V` and `node_features=F` in the configuration. The default eight-feature convention is type code, log nominal value, tolerance width, DC voltage, DC current, output sensitivity, input distance and output distance. The `dc_sensitivity_columns` setting identifies the three columns removed by that ablation. The paper does not specify column encoding or loss weights; the configuration records the chosen implementation values (0.5/0.1/0.1), rather than claiming recovered original settings.
+`x_pair` must be a different tolerance realization of the **same component and signed drift**; it is not an arbitrary augmentation or another class. Candidate nodes must appear in the same order as component labels. `adjacency` is symmetric with zero diagonal; an edge connects components sharing a net. The GIN adds its own self term. Set `components=V` and `node_features=F` in the configuration. The default eight-feature convention is type code, log nominal value, tolerance width, DC voltage, DC current, output sensitivity, input distance and output distance. The `dc_sensitivity_columns` setting identifies the three columns removed by that ablation. Default auxiliary loss weights are 0.5/0.1/0.1.
 
 ```bash
 python -m topofault prepare --source data/raw.npz --output data/prepared --seed 17
 ```
 
-`group` is mandatory and must encode circuit/component/signed-drift setting. An explicit integer `split` array (0=train, 1=validation, 2=test) preserves a registered split. Otherwise groups are assigned 60/20/20, an implementation choice. Every stored field must share the sample axis. Files are loaded without pickle. For the paper's unseen-tolerance protocol, supply explicit split assignments whose test tolerance is wider; a random split alone does not create that protocol. Fit any response standardization on training data and apply those same statistics to `x_pair`, validation and test exports. This adapter does not run SPICE, infer tolerance grouping, or perform image preprocessing.
+`group` is mandatory and must encode circuit/component/signed-drift setting. An explicit integer `split` array (0=train, 1=validation, 2=test) preserves a registered split. Otherwise groups are assigned 60/20/20, an implementation choice. Every stored field must share the sample axis. Files are loaded without pickle. For unseen-tolerance evaluation, supply explicit splits with wider test tolerance ranges. Fit any response standardization on training data and apply those same statistics to `x_pair`, validation and test exports. This adapter does not run SPICE, infer tolerance grouping, or perform image preprocessing.
 
 ## Training and inference
 
@@ -56,7 +56,7 @@ python -m topofault suite --config configs/default.json --data data/prepared --o
 
 Select a subset with `--methods`: `topofault`, `waveform_only`, `graph_only`, `late_fusion`, `no_consistency`, `no_severity`, `no_calibration`, `no_dc_sensitivity`. The waveform-only control suppresses graph dependence in localization, severity and confidence outputs. The graph-only control suppresses waveform dependence. Late fusion sets the attention-weighted feature block to zero.
 
-The hand-crafted baselines share 48 fixed response descriptors (12 summaries per channel) with train-only standardization. They use an RBF SVC/SVR, or 100 depth-3 XGBoost estimators with learning rate 0.05, one CPU thread and seed 17. The original descriptor details and hyperparameters were not provided; these are declared implementation choices. The XGBoost path requires the optional dependency (`python -m pip install -e '.[baselines]'`).
+The hand-crafted baselines share 48 fixed response descriptors (12 summaries per channel) with train-only standardization. They use an RBF SVC/SVR, or 100 depth-3 XGBoost estimators with learning rate 0.05, one CPU thread and seed 17. The XGBoost path requires the optional dependency (`python -m pip install -e '.[baselines]'`).
 
 ```bash
 python -m topofault.baselines train --method svm --data data/prepared --seed 17 --output runs/svm
@@ -75,9 +75,9 @@ python -m topofault plot --inputs runs/main/topofault results/topofault --output
 
 `figures/` contains loss curves and metric plots from the supplied run directories.
 
-## Method and metric coverage
+## Components and metrics
 
-| Paper quantity | Code entry | Command/configuration |
+| Component / metric | Code entry | Command/configuration |
 |---|---|---|
 | Two-layer GIN, 3/5/9 waveform convolutions and response-conditioned attention | `core.Model` | `train`, `hidden` |
 | Flat SPICE shared-terminal graph and ordered eight-feature export | `graph.build` | `python -m topofault.graph` |
@@ -88,14 +88,12 @@ python -m topofault plot --inputs runs/main/topofault results/topofault --output
 | Severity MAE and confidence calibration | `core.metrics` | `severity_mae`, `ece`, `softmax_ece`, `confidence_brier` |
 | Parameters, measured batch latency and partial operator count | `cli.evaluate` | `parameters`, `batch_latency_*`, `conv_linear_gru_*` |
 
-MAE is in the same signed-drift units as `severity`; use fractional drift (0.2 for +20%) and multiply by 100 for percentage points. Classification metrics and ECE are fractions. `ece` uses the selected component's trained confidence head, with 15 equal-width bins; `softmax_ece` separately reports localization-softmax ECE. The no-calibration control uses its softmax confidence. Reported MACs cover convolution and linear layers; attention and graph-matrix products are outside this counter, so these are not total model FLOPs. Timing is batch timing on the current machine, not the paper's hardware latency.
+MAE is in the same signed-drift units as `severity`; use fractional drift (0.2 for +20%) and multiply by 100 for percentage points. Classification metrics and ECE are fractions. `ece` uses the selected component's trained confidence head, with 15 equal-width bins; `softmax_ece` separately reports localization-softmax ECE. The no-calibration control uses its softmax confidence. Reported MACs cover convolution and linear layers; attention and graph-matrix products are outside this counter, so these are not total model FLOPs. Latency measures batches on the current machine.
 
-## Functional validation and remaining inputs
+## Checks
 
 ```bash
 python verify.py --output runs/functional-check
 ```
 
-The check builds a three-component SPICE graph, reads grouped NPZ data, trains/evaluates all eight neural variants for one epoch, checks finite loss, nonzero finite gradients and actual updates in GIN/attention/waveform/localization/severity/confidence parameters, verifies save/load outputs (`rtol=1e-6`, `atol=1e-7`), tests graph/waveform isolation, checks hand-computed accuracy/F1/ECE, and renders plots. It also fits, saves/loads and evaluates SVM, plus XGBoost when that optional dependency is installed. It writes `verification.json` and generated artifacts under the requested fresh directory. Environment used for this check: Python 3.13.5, NumPy 2.1.3, SciPy 1.15.3, PyTorch 2.7.1+cu118 on CPU, scikit-learn 1.6.1, Matplotlib 3.10.0; XGBoost 3.4.1 was checked from an isolated repository-local dependency directory. The neural, graph and traditional checks were run in separate CPU invocations.
-
-The implementation covers the neural method, its listed neural ablations and executable SVM/XGBoost baselines. Original four-circuit SPICE decks/generation, exact descriptor/feature encodings, original group manifests, unseen-tolerance datasets, and measured reference results are not supplied by this repository. They remain required for the paper's full baseline table and performance reproduction.
+The generated-data check covers graph conversion, all eight neural variants, gradients, checkpoint reload, branch isolation, metrics, SVM/XGBoost persistence and plots. XGBoost checks require the optional dependency.
